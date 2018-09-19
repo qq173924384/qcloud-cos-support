@@ -8,9 +8,8 @@ Author: Jeffery Wang
 Author URI: http://blog.wangjunfeng.com
 License: MIT
 */
-require_once('sdk/include.php');
-use Qcloud_cos\Auth;
-use Qcloud_cos\Cosapi;
+require_once __DIR__ . '/vendor/autoload.php';
+require_once __DIR__ . '/sdk/CosUtil.php';
 
 if (!defined('WP_PLUGIN_URL'))
     define('WP_PLUGIN_URL', WP_CONTENT_URL . '/plugins');//  plugin url
@@ -26,6 +25,7 @@ function cos_set_options()
 {
     $options = array(
         'bucket' => "",
+        'region' => '',
         'app_id' => "",
         'secret_id' => "",
         'secret_key' => "",
@@ -37,6 +37,11 @@ function cos_set_options()
 }
 
 
+function _getObjectUrl($object)
+{
+    return (parse_url(get_option('upload_url_path'))['path'] ?: '/') . str_replace('/' . get_option('upload_path'), '', $object);
+}
+
 /**
  * 上传函数
  * @param $object
@@ -44,57 +49,17 @@ function cos_set_options()
  * @param $opt
  * @return bool
  */
-function _file_upload($object, $file, $opt = array())
+function _file_upload($object, $file)
 {
     //设置超时时间
     //set_time_limit(120);
 
     //如果文件不存在，直接返回FALSE
-    if (!@file_exists($file))
-        return FALSE;
-
-    //获取WP配置信息
-    $cos_options = get_option('cos_options', TRUE);
-    $cos_bucket = esc_attr($cos_options['bucket']);
-
-    if (@file_exists($file)) {
-        try {
-            //实例化存储对象
-            $qcloud_cos = new Cosapi();
-            $dirname = dirname($object);
-            _create_folder($cos_bucket, $dirname);
-            $data = $qcloud_cos->upload($file, $cos_bucket, $object);
-            return TRUE;
-        } catch (Exception $ex) {
-            return FALSE;
-        }
-    } else {
-        return FALSE;
+    if (!file_exists($file)) {
+        return false;
     }
+    return CosUtil::upload($file, _getObjectUrl($object));
 }
-
-/**
- * 创建相应的目录
- * @param $cos_bucket
- * @param $dir
- */
-function _create_folder($cos_bucket, $dir)
-{
-    $qcloud_cos = new Cosapi();
-    $data = $qcloud_cos->statFolder($cos_bucket, $dir . '/');
-    if ($data['code'] == -166) {
-        $dir_array = explode('/', $dir);
-        $dir_name = '';
-        foreach ($dir_array as $dir) {
-            $dir_name .= ($dir . '/');
-            $result = $qcloud_cos->statFolder($cos_bucket, $dir_name);
-            if ($result['code'] == -166) {
-                $qcloud_cos->createFolder($cos_bucket, $dir_name);
-            }
-        }
-    }
-}
-
 
 /**
  * 是否需要删除本地文件
@@ -147,11 +112,8 @@ function upload_attachments($metadata)
     //在本地的存储路径
     $file = get_home_path() . $object;    //向上兼容，较早的WordPress版本上$metadata['file']存放的是相对路径
 
-    //设置可选参数
-    $opt = array('Content-Type' => $metadata['type']);
-
     //执行上传操作
-    _file_upload('/' . $object, $file, $opt);
+    _file_upload('/' . $object, $file);
 
     //如果不在本地保存，则删除本地文件
     if (_is_delete_local_file()) {
@@ -209,7 +171,8 @@ function upload_thumbs($metadata)
             $opt = array('Content-Type' => $val['mime-type']);
 
             //执行上传操作
-            _file_upload($object, $file, $opt);
+            $res = _file_upload($object, $file);
+            file_put_contents(__DIR__ .'/log.log','_file_upload(\'/\' . $object, $file):' . json_encode((array)$res,JSON_UNESCAPED_UNICODE) . "\n",FILE_APPEND);
 
             //如果不在本地保存，则删除
             if ($is_delete_local_file)
@@ -230,20 +193,13 @@ if (substr_count($_SERVER['REQUEST_URI'], '/update.php') <= 0)
 function delete_remote_file($file)
 {
     //获取WP配置信息
-    $cos_options = get_option('cos_options', TRUE);
-    $cos_bucket = esc_attr($cos_options['bucket']);
+    $cos_options = get_option('cos_options', true);
+    $cos_bucket  = esc_attr($cos_options['bucket']);
 
     //得到远程路径
-    $file = str_replace("\\", '/', $file);
+    $file          = str_replace("\\", '/', $file);
     $del_file_path = str_replace(get_home_path(), '/', $file);
-    try {
-        //实例化存储对象
-        $qcloud_cos = new Cosapi();
-        //删除文件
-        $qcloud_cos->del($cos_bucket, $del_file_path);
-    } catch (Exception $ex) {
-
-    }
+    CosUtil::delete(_getObjectUrl($del_file_path));
     return $file;
 }
 
@@ -267,7 +223,7 @@ if (get_option('upload_path') == '.') {
 function cos_plugin_action_links($links, $file)
 {
     if ($file == plugin_basename(dirname(__FILE__) . '/qcloud-cos-support.php')) {
-        $links[] = '<a href="options-general.php?page=' . COS_BASEFOLDER . '/qcloud-cos-support.php">' . 设置 . '</a>';
+        $links[] = '<a href="options-general.php?page=' . COS_BASEFOLDER . '/qcloud-cos-support.php">设置</a>';
     }
     return $links;
 }
@@ -293,6 +249,7 @@ function cos_setting_page()
     $options = array();
     if (!empty($_POST)) {
         $options['bucket'] = (isset($_POST['bucket'])) ? trim(stripslashes($_POST['bucket'])) : '';
+        $options['region'] = (isset($_POST['region'])) ? trim(stripslashes($_POST['region'])) : '';
         $options['app_id'] = (isset($_POST['app_id'])) ? trim(stripslashes($_POST['app_id'])) : '';
         $options['secret_id'] = (isset($_POST['secret_id'])) ? trim(stripslashes($_POST['secret_id'])) : '';
         $options['secret_key'] = (isset($_POST['secret_key'])) ? trim(stripslashes($_POST['secret_key'])) : '';
@@ -324,6 +281,7 @@ function cos_setting_page()
     $upload_url_path = get_option('upload_url_path');
 
     $cos_bucket = esc_attr($cos_options['bucket']);
+    $cos_region = esc_attr($cos_options['region']);
     $cos_app_id = esc_attr($cos_options['app_id']);
     $cos_secret_id = esc_attr($cos_options['secret_id']);
     $cos_secret_key = esc_attr($cos_options['secret_key']);
@@ -350,6 +308,17 @@ function cos_setting_page()
 
                         <p>请先访问 <a href="http://console.qcloud.com/cos" target="_blank">腾讯云控制台</a> 创建
                             <code>bucket</code> ，再填写以上内容。</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>
+                        <legend>所属地域 设置</legend>
+                    </th>
+                    <td>
+                        <input type="text" name="region" value="<?php echo $cos_region; ?>" size="50"
+                               placeholder="ap-guangzhou"/>
+
+                        <p>访问域名以以下规则命名：(bucket)-(appid).cos.(region).myqcloud.com</p>
                     </td>
                 </tr>
                 <tr>
